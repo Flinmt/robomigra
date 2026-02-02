@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  worker:
+    build: .
+    container_name: robomigra_worker
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - TZ=America/Sao_Paulo
+    # Mapeamento para permitir acesso ao banco de dados na máquina host
+    # Se o banco estiver local, use 'host.docker.internal' como DB_SERVER no .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
