@@ -5,29 +5,45 @@ class Repository:
     
     @staticmethod
     def get_stats(cursor):
-        """Calcula estatísticas de progresso."""
-        # 1. Total Geral
-        cursor.execute("SELECT COUNT(*) FROM tblmigracao WITH (NOLOCK)")
-        total_files = cursor.fetchone()[0]
+        """Calcula estatísticas de progresso detalhadas (Imgs vs PDFs)."""
+        
+        # 1. Total Migrado (Separado por Tipo)
+        # JOIN com tblmigracao para verificar extensão
+        sql_migrated = """
+            SELECT 
+                SUM(CASE WHEN m.strextensao = 'pdf' THEN 0 ELSE 1 END) as imgs,
+                SUM(CASE WHEN m.strextensao = 'pdf' THEN 1 ELSE 0 END) as pdfs
+            FROM tbl_controle_migracao_python c WITH (NOLOCK)
+            INNER JOIN tblmigracao m WITH (NOLOCK) ON c.strCodigoImagemOrigem = m.strCodigo
+        """
+        cursor.execute(sql_migrated)
+        row_mig = cursor.fetchone()
+        mig_imgs = row_mig[0] or 0
+        mig_pdfs = row_mig[1] or 0
 
-        # 2. Total Migrado
-        cursor.execute("SELECT COUNT(*) FROM tbl_controle_migracao_python WITH (NOLOCK)")
-        total_migrated = cursor.fetchone()[0]
-
-        # 3. Pendentes Válidos
+        # 2. Pendentes Válidos (Separado por Tipo)
         sql_pending = """
-            SELECT COUNT(*)
+            SELECT 
+                SUM(CASE WHEN m.strextensao = 'pdf' THEN 0 ELSE 1 END) as imgs_pend,
+                SUM(CASE WHEN m.strextensao = 'pdf' THEN 1 ELSE 0 END) as pdfs_pend
             FROM tblmigracao m WITH (NOLOCK)
-            WHERE m.strextensao IN ('jpg', 'jpeg', 'png', 'bmp')
+            WHERE m.strextensao IN ('jpg', 'jpeg', 'png', 'bmp', 'pdf')
             AND NOT EXISTS (
                 SELECT 1 FROM tbl_controle_migracao_python C WITH (NOLOCK)
                 WHERE C.strCodigoImagemOrigem = m.strCodigo
             )
         """
         cursor.execute(sql_pending)
-        total_pending = cursor.fetchone()[0]
+        row_pend = cursor.fetchone()
+        pend_imgs = row_pend[0] or 0
+        pend_pdfs = row_pend[1] or 0
 
-        return total_files, total_migrated, total_pending
+        return {
+            'migrated_imgs': mig_imgs,
+            'migrated_pdfs': mig_pdfs,
+            'pending_imgs': pend_imgs,
+            'pending_pdfs': pend_pdfs
+        }
 
     @staticmethod
     def fetch_batch(cursor):
@@ -36,7 +52,7 @@ class Repository:
             SELECT TOP {Config.BATCH_SIZE} m.strCodigoPaciente
             FROM tblmigracao m WITH (NOLOCK)
             INNER JOIN img_rcl i WITH (NOLOCK) ON m.strCodigo = CAST(i.IMG_RCL_IND AS VARCHAR(50))
-            WHERE m.strextensao IN ('jpg', 'jpeg', 'png', 'bmp')
+            WHERE m.strextensao IN ('jpg', 'jpeg', 'png', 'bmp', 'pdf')
             AND NOT EXISTS (
                 SELECT 1 FROM tbl_controle_migracao_python C WITH (NOLOCK)
                 WHERE C.strCodigoImagemOrigem = m.strCodigo
@@ -65,7 +81,7 @@ class Repository:
             LEFT JOIN tblProcedimento P_Novo WITH (NOLOCK) ON P_Novo.strCodigo = DP.Destino_Codigo
             LEFT JOIN tblProcedimento P_Velho WITH (NOLOCK) ON P_Velho.strCodigo = CAST(i.IMG_RCL_RCL_COD AS VARCHAR(50))
             WHERE m.strCodigoPaciente = ? 
-            AND m.strextensao IN ('jpg', 'jpeg', 'png', 'bmp')
+            AND m.strextensao IN ('jpg', 'jpeg', 'png', 'bmp', 'pdf')
             AND NOT EXISTS (
                 SELECT 1 FROM tbl_controle_migracao_python C WITH (NOLOCK)
                 WHERE C.strCodigoImagemOrigem = m.strCodigo

@@ -26,6 +26,10 @@ class IdGenerator:
         # Inicializa o próximo ID disponível baseado no estado atual do banco
         self.last_img_id = self._get_max_id("tbllaudoimagem", "intLaudoImagemId")
         self.last_fat_id = self._get_max_id("tblfaturaatendimento", "intFaturaAtendimentoId")
+        
+        # Cache para controlar IDs de atendimento por cliente na sessão
+        # Formato: { cliente_id: last_used_id }
+        self.client_atend_cache = {}
 
     def _get_max_id(self, table, pk_column):
         """Busca o maior ID atual de uma tabela usando NOLOCK."""
@@ -46,10 +50,16 @@ class IdGenerator:
 
     def get_atendimento_id_by_client(self, cliente_id):
         """
-        Retorna o ID de Atendimento.
-        Nota: Mantém a lógica legada onde o ID parece ser sequencial POR CLIENTE ou depende de contexto específico.
-        Não é cacheado globalmente por segurança.
+        Retorna o PRÓXIMO ID de Atendimento para o cliente.
+        Gerencia cache local para garantir incremento correto dentro da transação.
         """
-        sql = "SELECT ISNULL(MAX(intAtendimentoId), 0) + 1 FROM tblatendimento WITH (NOLOCK) WHERE intClienteId = ?"
-        self.cursor.execute(sql, (cliente_id,))
-        return self.cursor.fetchone()[0]
+        if cliente_id not in self.client_atend_cache:
+            # Primeira vez no lote para esse cliente: busca do banco
+            sql = "SELECT ISNULL(MAX(intAtendimentoId), 0) FROM tblatendimento WITH (NOLOCK) WHERE intClienteId = ?"
+            self.cursor.execute(sql, (cliente_id,))
+            current_max = self.cursor.fetchone()[0]
+            self.client_atend_cache[cliente_id] = current_max
+
+        # Incrementa e atualiza cache
+        self.client_atend_cache[cliente_id] += 1
+        return self.client_atend_cache[cliente_id]

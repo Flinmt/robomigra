@@ -60,7 +60,7 @@ def run_worker():
         # --- 1. Monitoramento ---
         try:
             stats = Repository.get_stats(cursor)
-            print(f"📊 STATUS: Total: {stats[0]} | Migrados: {stats[1]} | Fila Pendente: {stats[2]}")
+            print(f"📊 STATUS: Migrados [{stats['migrated_imgs']} Imgs | {stats['migrated_pdfs']} PDFs] | Pendentes [{stats['pending_imgs']} Imgs | {stats['pending_pdfs']} PDFs]")
         except Exception as e:
             print(f"⚠️  Erro ao buscar stats: {e}")
 
@@ -87,10 +87,11 @@ def run_worker():
         id_gen = IdGenerator(cursor)
         batch_count += 1
         print(f"📦 LOTE #{batch_count} | Pacientes: {len(pacientes)} | Processando...")
-
+        
         try:
             for cod_paciente in pacientes:
                 target_pac_id = int(cod_paciente)
+                print(f"🔄 Processando Paciente {target_pac_id}...")
                 
                 # Busca Imagens
                 rows = Repository.fetch_patient_images(cursor, cod_paciente)
@@ -106,11 +107,18 @@ def run_worker():
                 Repository.toggle_identity(cursor, "tbllaudoimagem", "ON")
                 
                 saved_count = 0
-                dates_migrated = set()
+                saved_imgs = 0
+                saved_pdfs = 0
+                skipped_empty = 0
                 
+                clean_rows = []
                 for row in valid_rows:
                     if not row.blob_data or not row.data_raw:
                         Repository.mark_as_migrated(cursor, row.id_imagem_origem)
+                        skipped_empty += 1
+                    else:
+                        clean_rows.append(row)
+
                 migrated_dates = [] # Changed to list to collect all dates for logging
                 
                 # --- 2.2. Agrupamento Inteligente ---
@@ -118,7 +126,7 @@ def run_worker():
                 # Objetivo: Unificar múltiplas imagens do mesmo exame/dia em um único Atendimento
                 grouped_images = {}
                 
-                for img in valid_rows:
+                for img in clean_rows:
                     # img = (id_origem, blob, ext, data_full, cod_proc, nome_proc, cod_pac)
                     # Extrai apenas a DATA (Ignora Hora) para agrupar
                     data_dia = img.data_raw.date() if img.data_raw else datetime.min.date()
@@ -150,7 +158,11 @@ def run_worker():
                     
                     # LOG DETALHADO (Solicitado pelo Usuário)
                     data_fmt = header_img.data_raw.strftime('%d/%m/%Y')
-                    print(f"   ► Grupo: Proc {header_img.cod_proc} em {data_fmt} ({len(items)} imgs) -> AtendID: {atend_id} | FatID: {fatura_id}")
+                    
+                    count_imgs = sum(1 for i in items if i.extensao.lower() != 'pdf')
+                    count_pdfs = len(items) - count_imgs
+                    
+                    print(f"   ► Grupo: Proc {header_img.cod_proc} em {data_fmt} ({count_imgs} imgs | {count_pdfs} pdfs) -> AtendID: {atend_id} | FatID: {fatura_id}")
 
                     # Insert 1: Atendimento (Pai)
                     cursor.execute("""
@@ -184,31 +196,54 @@ def run_worker():
                         header_img.data_raw, header_img.data_raw, None, None
                     ))
 
-                    # Insert 4: Imagens (Bisnetos - Loop interno)
+                    # Insert 4: Imagens ou PDFs (Bisnetos - Loop interno)
                     for info_img in items:
-                        # Skip if image data is missing
+                        # Skip if content data is missing
                         if not info_img.blob_data or not info_img.data_raw:
                             Repository.mark_as_migrated(cursor, info_img.id_imagem_origem)
                             continue
 
-                        img_id = id_gen.next_global_img_id()
-                        fn = f"{header_img.cod_proc}-{fatura_id}-{str(uuid.uuid4())[:4]}.{info_img.extensao}"
-                        
-                        cursor.execute("""
-                            INSERT INTO tbllaudoimagem (
-                                intLaudoImagemId, strLaudoImagem, intClienteId, intAtendimentoId, intFaturaAtendimentoId, 
-                                strCodigoProcedimento, strDescrProcedimento, intOrdem, strTerminal, 
-                                imgImagem, intUsuarioId, intEmpresaId, datLaudoImagem, bolImpressao, intLaudoClienteId
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """, (
-                            img_id, fn, target_pac_id, atend_id, fatura_id,
-                            header_img.cod_proc, header_img.nome_proc, 0, 'MIGRACAO', 
-                            pyodbc.Binary(info_img.blob_data), 61, 1, header_img.data_raw, 'N', laudo_cli_id
-                        ))
+                        is_pdf = (info_img.extensao.lower() == 'pdf')
 
-                        # Marca cada imagem individualmente como migrada
+                        if is_pdf:
+                            # --- Inserção de PDF ---
+                            cursor.execute("""
+                                INSERT INTO tbllaudopdfanexo (
+                                    intClienteId, intAtendimentoId, intLaudoClienteId, 
+                                    strLaudoPDFAnexo, bolLiberado, intUsuarioId, 
+                                    datLaudoPDFAnexo, intEmpresaId, bolImportado, 
+                                    strLaudoPDFAnexoSemTimbre
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """, (
+                                target_pac_id, atend_id, laudo_cli_id,
+                                pyodbc.Binary(info_img.blob_data), 1, 61,
+                                info_img.data_raw, 1, 0,
+                                pyodbc.Binary(info_img.blob_data)
+                            ))
+                        else:
+                            # --- Inserção de Imagem (Legado) ---
+                            img_id = id_gen.next_global_img_id()
+                            fn = f"{header_img.cod_proc}-{fatura_id}-{str(uuid.uuid4())[:4]}.{info_img.extensao}"
+                            
+                            cursor.execute("""
+                                INSERT INTO tbllaudoimagem (
+                                    intLaudoImagemId, strLaudoImagem, intClienteId, intAtendimentoId, intFaturaAtendimentoId, 
+                                    strCodigoProcedimento, strDescrProcedimento, intOrdem, strTerminal, 
+                                    imgImagem, intUsuarioId, intEmpresaId, datLaudoImagem, bolImpressao, intLaudoClienteId
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """, (
+                                img_id, fn, target_pac_id, atend_id, fatura_id,
+                                header_img.cod_proc, header_img.nome_proc, 0, 'MIGRACAO', 
+                                pyodbc.Binary(info_img.blob_data), 61, 1, header_img.data_raw, 'N', laudo_cli_id
+                            ))
+
+                        # Marca cada item (img ou pdf) individualmente como migrado
                         Repository.mark_as_migrated(cursor, info_img.id_imagem_origem)
                         saved_count += 1
+                        if is_pdf:
+                            saved_pdfs += 1
+                        else:
+                            saved_imgs += 1
                         
                         # Coleta data para log
                         if info_img.data_raw:
@@ -217,7 +252,7 @@ def run_worker():
                 Repository.toggle_identity(cursor, "tbllaudoimagem", "OFF")
                 
                 dates_str = ", ".join(sorted(list(set(migrated_dates)))) # Use set for unique dates in log
-                print(f"   ✅ Paciente {cod_paciente}: {saved_count} imagens migradas. [Ref: {dates_str}]")
+                print(f"   ✅ Paciente {cod_paciente}: {saved_imgs} imgs | {saved_pdfs} pdfs | ⚠️ {skipped_empty} vazios. [Ref: {dates_str}]")
                 total_session_migrated += saved_count
                 time.sleep(Config.SLEEP_PATIENT)
 
